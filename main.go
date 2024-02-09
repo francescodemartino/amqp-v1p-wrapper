@@ -24,7 +24,7 @@ func main() {
 		Text:  "ciao come va",
 	}, "3324324243")
 
-	activeMqClient.Subscribe(queue, func(msg Test) bool {
+	activeMqClient.Subscribe(queue, func(msg Test, correlationId string) bool {
 		fmt.Println("sono qui 1")
 		fmt.Println(msg)
 		return true

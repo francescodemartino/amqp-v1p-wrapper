@@ -13,8 +13,10 @@ type ActiveMQ[T any] struct {
 	addr       string
 	connection *amqp.Conn
 	session    *amqp.Session
+	// logger     Logger
 }
 
+// func New[T any](host string, port string, logger Logger) (*ActiveMQ[T], error) {
 func New[T any](host string, port string) (*ActiveMQ[T], error) {
 	client := &ActiveMQ[T]{addr: "amqp://" + host + ":" + port}
 	err := client.connect()
@@ -90,7 +92,7 @@ func (a *ActiveMQ[T]) SendWithCorrelation(destination string, msg any, correlati
 	return sender.Send(ctx, &amqpMsg, nil)
 }
 
-func (a *ActiveMQ[T]) Subscribe(destination string, handler func(msg T) bool, numRunner int) error {
+func (a *ActiveMQ[T]) Subscribe(destination string, handler func(msg T, correlationId string) bool, numRunner int) error {
 	ctx := context.Background()
 	limiter := make(chan bool, numRunner)
 	receiver, _ := a.session.NewReceiver(ctx, destination, nil)
@@ -106,16 +108,24 @@ func (a *ActiveMQ[T]) Subscribe(destination string, handler func(msg T) bool, nu
 	}
 }
 
-func (a *ActiveMQ[T]) sub(ctx context.Context, receiver *amqp.Receiver, msg *amqp.Message, handler func(msg T) bool, limiter *chan bool) {
+func (a *ActiveMQ[T]) sub(ctx context.Context, receiver *amqp.Receiver, msg *amqp.Message, handler func(msg T, correlaionId string) bool, limiter *chan bool) {
 	defer subEndHandler(ctx, receiver, msg, limiter)
 	msgJson := msg.Value.([]byte)
 	var msgStruct T
+	var correlationId string
+	if msg.Properties != nil {
+		if id, ok := msg.Properties.CorrelationID.(string); ok {
+			correlationId = id
+		} else {
+			fmt.Println("CorrelationID is not a string:", msg.Properties.CorrelationID)
+		}
+	}
 	err := json.Unmarshal(msgJson, &msgStruct)
 
 	if err != nil {
 		receiver.RejectMessage(ctx, msg, nil)
 	} else {
-		if handlerErr := handler(msgStruct); !handlerErr {
+		if handlerErr := handler(msgStruct, correlationId); !handlerErr {
 			receiver.RejectMessage(ctx, msg, nil)
 		}
 		receiver.AcceptMessage(ctx, msg)

@@ -1,6 +1,9 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"go.uber.org/zap"
+)
 
 const LimitEmail = 15
 
@@ -10,6 +13,9 @@ type Test struct {
 }
 
 func main() {
+	logger, _ := zap.NewProduction()
+	defer logger.Sync()
+
 	queue := "test/send-msg5"
 
 	activeMqClient, _ := New[Test]("localhost", "5672")
@@ -28,7 +34,8 @@ func main() {
 		fmt.Println("sono qui 1")
 		fmt.Println(msg)
 		return true
-	}, NumRunnerDefault)
+	}, NumRunnerDefault,
+		logger)
 
 	<-make(chan int)
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/Azure/go-amqp"
+	"go.uber.org/zap"
 )
 
 const NumRunnerDefault = 3
@@ -13,10 +14,8 @@ type ActiveMQ[T any] struct {
 	addr       string
 	connection *amqp.Conn
 	session    *amqp.Session
-	// logger     Logger
 }
 
-// func New[T any](host string, port string, logger Logger) (*ActiveMQ[T], error) {
 func New[T any](host string, port string) (*ActiveMQ[T], error) {
 	client := &ActiveMQ[T]{addr: "amqp://" + host + ":" + port}
 	err := client.connect()
@@ -92,7 +91,7 @@ func (a *ActiveMQ[T]) SendWithCorrelation(destination string, msg any, correlati
 	return sender.Send(ctx, &amqpMsg, nil)
 }
 
-func (a *ActiveMQ[T]) Subscribe(destination string, handler func(msg T, correlationId string) bool, numRunner int) error {
+func (a *ActiveMQ[T]) Subscribe(destination string, handler func(msg T, correlationId string) bool, numRunner int, logger *zap.Logger) error {
 	ctx := context.Background()
 	limiter := make(chan bool, numRunner)
 	receiver, _ := a.session.NewReceiver(ctx, destination, nil)
@@ -104,12 +103,12 @@ func (a *ActiveMQ[T]) Subscribe(destination string, handler func(msg T, correlat
 			return err
 		}
 		limiter <- true
-		go a.sub(ctx, receiver, msg, handler, &limiter)
+		go a.sub(ctx, receiver, msg, handler, &limiter, logger)
 	}
 }
 
-func (a *ActiveMQ[T]) sub(ctx context.Context, receiver *amqp.Receiver, msg *amqp.Message, handler func(msg T, correlaionId string) bool, limiter *chan bool) {
-	defer subEndHandler(ctx, receiver, msg, limiter)
+func (a *ActiveMQ[T]) sub(ctx context.Context, receiver *amqp.Receiver, msg *amqp.Message, handler func(msg T, correlaionId string) bool, limiter *chan bool, logger *zap.Logger) {
+	defer subEndHandler(ctx, receiver, msg, limiter, logger)
 	msgJson := msg.Value.([]byte)
 	var msgStruct T
 	var correlationId string
@@ -132,11 +131,10 @@ func (a *ActiveMQ[T]) sub(ctx context.Context, receiver *amqp.Receiver, msg *amq
 	}
 }
 
-func subEndHandler(ctx context.Context, receiver *amqp.Receiver, msg *amqp.Message, limiter *chan bool) {
+func subEndHandler(ctx context.Context, receiver *amqp.Receiver, msg *amqp.Message, limiter *chan bool, logger *zap.Logger) {
 	if r := recover(); r != nil {
 		receiver.RejectMessage(ctx, msg, nil)
-		// TODO add log
-		fmt.Println("Recovered from panic error:", r)
+		logger.Error("Recovered from panic error", zap.Any("error", r))
 	}
 	<-*limiter
 }

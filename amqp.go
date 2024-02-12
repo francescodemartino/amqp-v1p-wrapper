@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"github.com/Azure/go-amqp"
 	"go.uber.org/zap"
 )
@@ -107,7 +106,7 @@ func (a *ActiveMQ[T]) Subscribe(destination string, handler func(msg T, correlat
 	}
 }
 
-func (a *ActiveMQ[T]) sub(ctx context.Context, receiver *amqp.Receiver, msg *amqp.Message, handler func(msg T, correlaionId string) bool, limiter *chan bool, logger *zap.Logger) {
+func (a *ActiveMQ[T]) sub(ctx context.Context, receiver *amqp.Receiver, msg *amqp.Message, handler func(msg T, correlationId string) bool, limiter *chan bool, logger *zap.Logger) {
 	defer subEndHandler(ctx, receiver, msg, limiter, logger)
 	msgJson := msg.Value.([]byte)
 	var msgStruct T
@@ -115,8 +114,6 @@ func (a *ActiveMQ[T]) sub(ctx context.Context, receiver *amqp.Receiver, msg *amq
 	if msg.Properties != nil {
 		if id, ok := msg.Properties.CorrelationID.(string); ok {
 			correlationId = id
-		} else {
-			fmt.Println("CorrelationID is not a string:", msg.Properties.CorrelationID)
 		}
 	}
 	err := json.Unmarshal(msgJson, &msgStruct)

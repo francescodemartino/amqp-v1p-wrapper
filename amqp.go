@@ -111,7 +111,7 @@ func (a *ActiveMQ[T]) sub(ctx context.Context, receiver *amqp.Receiver, msg *amq
 	defer subEndHandler(ctx, receiver, msg, limiter, logger)
 	msgJson := msg.Value.([]byte)
 	var msgStruct T
-	var correlationId string
+	correlationId := ""
 	if msg.Properties != nil {
 		if id, ok := msg.Properties.CorrelationID.(string); ok {
 			correlationId = id
@@ -134,7 +134,9 @@ func (a *ActiveMQ[T]) sub(ctx context.Context, receiver *amqp.Receiver, msg *amq
 func subEndHandler(ctx context.Context, receiver *amqp.Receiver, msg *amqp.Message, limiter *chan bool, logger *zap.Logger) {
 	if r := recover(); r != nil {
 		receiver.RejectMessage(ctx, msg, nil)
-		logger.Error("Recovered from panic error", zap.Any("error", r))
+		if logger != nil {
+			logger.Error("Recovered from panic error", zap.Any("error", r))
+		}
 	}
 	<-*limiter
 }

@@ -1,4 +1,4 @@
-module gitlab.com/evendo-project/queue-wrapper
+module github.com/francescodemartino/amqp-v1p-wrapper
 
 go 1.22
 

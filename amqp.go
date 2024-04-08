@@ -1,7 +1,3 @@
-// Package example provides functionality for connecting to amqp queues v1.0+.
-//
-// This library includes connection recovery and zap logger integration for error management
-
 package amqp
 
 import (

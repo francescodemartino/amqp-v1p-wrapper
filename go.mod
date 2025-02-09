@@ -3,7 +3,7 @@ module github.com/francescodemartino/amqp-v1p-wrapper
 go 1.22
 
 require (
-	github.com/Azure/go-amqp v1.0.4
+	github.com/Azure/go-amqp v1.3.0
 	go.uber.org/zap v1.26.0
 )
 

@@ -10,11 +10,21 @@ import (
 	"time"
 )
 
+type SubscriptionOptions struct {
+	ReceiverOptions        *amqp.ReceiverOptions
+	MaxTimeWithoutMessages *time.Duration
+}
+
 type backupMessage struct {
 	destination   string
 	msg           any
-	correlationId string
+	msgProperties *amqp.MessageProperties
 	logger        *zap.Logger
+}
+
+type receiveResponse struct {
+	msg *amqp.Message
+	err error
 }
 
 const DefaultNumRunner = 3
@@ -79,7 +89,7 @@ func monitorAndRetryConnection(host string, port string, logger *zap.Logger) {
 		for {
 			if err := connect(host, port, logger); err == nil {
 				for _, message := range sliceBackupMessages {
-					SendWithCorrelation(message.destination, message.msg, message.correlationId, message.logger)
+					SendWithOptions(message.destination, message.msg, message.msgProperties, message.logger)
 				}
 				sliceBackupMessages = make([]backupMessage, 0)
 				break
@@ -90,7 +100,28 @@ func monitorAndRetryConnection(host string, port string, logger *zap.Logger) {
 	}
 }
 
-func Subscribe[T any](destination string, handler func(msg T, correlationId string) bool, numRunner int, logger *zap.Logger) {
+func receiveMessage(receiver *amqp.Receiver) (<-chan receiveResponse, *chan bool) {
+	receiveResponseChan := make(chan receiveResponse)
+	doneChan := make(chan bool)
+	ctx := context.Background()
+	go func() {
+		for {
+			msg, err := receiver.Receive(ctx, nil)
+			var linkError *amqp.LinkError
+			if errors.As(err, &linkError) {
+				return
+			}
+			receiveResponseChan <- receiveResponse{msg: msg, err: err}
+			outMsg := <-doneChan
+			if !outMsg {
+				return
+			}
+		}
+	}()
+	return receiveResponseChan, &doneChan
+}
+
+func SubscribeWithOptions[T any](destination string, handler func(msg T, correlationId string) bool, subscriptionOptions *SubscriptionOptions, numRunner int, logger *zap.Logger) {
 	for {
 		ctx := context.Background()
 		limiter := make(chan bool, numRunner)
@@ -101,28 +132,67 @@ func Subscribe[T any](destination string, handler func(msg T, correlationId stri
 				logger.Error("amqp not subscribed", zap.Error(err))
 			}
 		} else {
-			receiver, _ := session.NewReceiver(ctx, destination, nil)
-			for {
-				msg, err := receiver.Receive(ctx, nil)
+			var receiverOptions *amqp.ReceiverOptions = nil
+			if subscriptionOptions != nil {
+				receiverOptions = subscriptionOptions.ReceiverOptions
+			}
+			receiver, _ := session.NewReceiver(ctx, destination, receiverOptions)
+			receiveResponseChan, doneChan := receiveMessage(receiver)
 
-				if err != nil {
+			for {
+				var rp receiveResponse
+
+				if subscriptionOptions != nil && subscriptionOptions.MaxTimeWithoutMessages != nil {
+					isTimeoutReached := false
+					select {
+					case rp = <-receiveResponseChan:
+					case <-time.After(*subscriptionOptions.MaxTimeWithoutMessages):
+						isTimeoutReached = true
+					}
+					if isTimeoutReached {
+						receiver.Close(ctx)
+						session.Close(ctx)
+						return
+					}
+				} else {
+					rp = <-receiveResponseChan
+				}
+
+				if rp.err != nil {
 					cancelCtxConnectionAmqp()
 					if logger != nil {
 						logger.Error("amqp receiver not work", zap.Error(err))
 					}
+					*doneChan <- false
 					break
 				}
 				limiter <- true
-				go sub(ctx, receiver, msg, handler, &limiter, logger)
+				go sub(ctx, receiver, rp.msg, handler, &limiter, logger)
+				*doneChan <- true
 			}
 		}
 		time.Sleep(secondsBeforeConnectionRetry * time.Second)
 	}
 }
 
+func Subscribe[T any](destination string, handler func(msg T, correlationId string) bool, numRunner int, logger *zap.Logger) {
+	SubscribeWithOptions(destination, handler, nil, numRunner, logger)
+}
+
 func sub[T any](ctx context.Context, receiver *amqp.Receiver, msg *amqp.Message, handler func(msg T, correlationId string) bool, limiter *chan bool, logger *zap.Logger) {
 	defer subEndHandler(ctx, receiver, msg, limiter, logger)
-	msgJson := msg.Value.([]byte)
+	var msgJson []byte
+	var okCasting bool
+
+	if msg.Value == nil {
+		msgJson = msg.GetData()
+	} else {
+		msgJson, okCasting = msg.Value.([]byte)
+		if !okCasting {
+			msgJson = []byte(msg.Value.(string))
+		}
+	}
+
 	var msgStruct T
 	correlationId := ""
 	if msg.Properties != nil {
@@ -135,10 +205,11 @@ func sub[T any](ctx context.Context, receiver *amqp.Receiver, msg *amqp.Message,
 	if err != nil {
 		receiver.RejectMessage(ctx, msg, nil)
 	} else {
-		if handlerErr := handler(msgStruct, correlationId); !handlerErr {
+		if done := handler(msgStruct, correlationId); done {
+			receiver.AcceptMessage(ctx, msg)
+		} else {
 			receiver.RejectMessage(ctx, msg, nil)
 		}
-		receiver.AcceptMessage(ctx, msg)
 	}
 }
 
@@ -152,15 +223,11 @@ func subEndHandler(ctx context.Context, receiver *amqp.Receiver, msg *amqp.Messa
 	<-*limiter
 }
 
-func Send(destination string, msg any, logger *zap.Logger) error {
-	return SendWithCorrelation(destination, msg, "", logger)
-}
-
-func SendWithCorrelation(destination string, msg any, correlationId string, logger *zap.Logger) error {
+func SendWithOptions(destination string, msg any, msgProperties *amqp.MessageProperties, logger *zap.Logger) error {
 	ctx := context.Background()
 	sender, err := getSenderForQueue(destination, logger)
 	if err != nil {
-		appendNotSentMessage(destination, msg, correlationId, logger)
+		appendNotSentMessage(destination, msg, msgProperties, logger)
 		cancelCtxConnectionAmqp()
 		return err
 	}
@@ -174,16 +241,19 @@ func SendWithCorrelation(destination string, msg any, correlationId string, logg
 		Value: msgJson,
 	}
 
-	if correlationId != "" {
-		amqpMsg.Properties = &amqp.MessageProperties{
-			CorrelationID: correlationId,
-		}
+	amqpMsg.Header = &amqp.MessageHeader{
+		Durable: true,
 	}
+
+	if msgProperties != nil {
+		amqpMsg.Properties = msgProperties
+	}
+
 	// check send msg format
 	err = sender.Send(ctx, &amqpMsg, nil)
 	if err != nil {
 		resetOrNewMapOfSenders()
-		appendNotSentMessage(destination, msg, correlationId, logger)
+		appendNotSentMessage(destination, msg, msgProperties, logger)
 		cancelCtxConnectionAmqp()
 		if logger != nil {
 			logger.Error("amqp send not work", zap.Error(err))
@@ -193,12 +263,23 @@ func SendWithCorrelation(destination string, msg any, correlationId string, logg
 	return err
 }
 
-func appendNotSentMessage(destination string, msg any, correlationId string, logger *zap.Logger) {
+func Send(destination string, msg any, logger *zap.Logger) error {
+	return SendWithOptions(destination, msg, nil, logger)
+}
+
+func SendWithCorrelation(destination string, msg any, correlationId string, logger *zap.Logger) error {
+	properties := amqp.MessageProperties{
+		CorrelationID: correlationId,
+	}
+	return SendWithOptions(destination, msg, &properties, logger)
+}
+
+func appendNotSentMessage(destination string, msg any, msgProperties *amqp.MessageProperties, logger *zap.Logger) {
 	mutexForAppendBackupMessages.Lock()
 	sliceBackupMessages = append(sliceBackupMessages, backupMessage{
 		destination:   destination,
 		msg:           msg,
-		correlationId: correlationId,
+		msgProperties: msgProperties,
 		logger:        logger,
 	})
 	mutexForAppendBackupMessages.Unlock()
